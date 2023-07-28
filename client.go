@@ -76,6 +76,7 @@ func NewClientFromRestConf(options *RestConfClientOptions) (Client, error) {
 
 // newClient is used by both NewClientFromKubeConf and NewClientFromRestConf
 // and returns a new Helm client via the provided options and REST config.
+
 func newClient(options *Options, clientGetter genericclioptions.RESTClientGetter, settings *cli.EnvSettings) (Client, error) {
 	err := setEnvSettings(&options, settings)
 	if err != nil {
@@ -93,17 +94,6 @@ func newClient(options *Options, clientGetter genericclioptions.RESTClientGetter
 		options.Output = os.Stdout
 	}
 
-	actionConfig := new(action.Configuration)
-	err = actionConfig.Init(
-		clientGetter,
-		settings.Namespace(),
-		os.Getenv("HELM_DRIVER"),
-		debugLog,
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	registryClient, err := registry.NewClient(
 		registry.ClientOptDebug(settings.Debug),
 		registry.ClientOptCredentialsFile(settings.RegistryConfig),
@@ -111,16 +101,46 @@ func newClient(options *Options, clientGetter genericclioptions.RESTClientGetter
 	if err != nil {
 		return nil, err
 	}
-	actionConfig.RegistryClient = registryClient
+
+	// need to access restConfig to create a new client getter with provided namespace
+	getClientSetter := func(namespace string) genericclioptions.RESTClientGetter {
+		cs, ok := clientGetter.(*RESTClientGetter)
+		if !ok {
+			return clientGetter
+		}
+
+		return NewRESTClientGetter(namespace, nil, cs.restConfig)
+	}
+
+	getActionConfig := func(namespace string) (*action.Configuration, error) {
+		actionConfig := new(action.Configuration)
+		err = actionConfig.Init(
+			getClientSetter(namespace),
+			namespace,
+			os.Getenv("HELM_DRIVER"),
+			debugLog,
+		)
+		if err != nil {
+			return nil, err
+		}
+		actionConfig.RegistryClient = registryClient
+		return actionConfig, nil
+	}
+
+	actionConfig, err := getActionConfig(settings.Namespace())
+	if err != nil {
+		return nil, err
+	}
 
 	return &HelmClient{
-		Settings:     settings,
-		Providers:    getter.All(settings),
-		storage:      &storage,
-		ActionConfig: actionConfig,
-		linting:      options.Linting,
-		DebugLog:     debugLog,
-		output:       options.Output,
+		Settings:        settings,
+		Providers:       getter.All(settings),
+		storage:         &storage,
+		ActionConfig:    actionConfig,
+		getActionConfig: getActionConfig,
+		linting:         options.Linting,
+		DebugLog:        debugLog,
+		output:          options.Output,
 	}, nil
 }
 
@@ -283,7 +303,12 @@ func (c *HelmClient) UninstallReleaseByName(name string) error {
 // install installs the provided chart.
 // Optionally lints the chart if the linting flag is set.
 func (c *HelmClient) install(ctx context.Context, spec *ChartSpec, opts *GenericHelmOptions) (*release.Release, error) {
-	client := action.NewInstall(c.ActionConfig)
+	actionConfig, err := c.getActionConfig(spec.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	client := action.NewInstall(actionConfig)
 	mergeInstallOptions(spec, client)
 
 	// NameAndChart returns either the TemplateName if set,
@@ -348,7 +373,13 @@ func (c *HelmClient) install(ctx context.Context, spec *ChartSpec, opts *Generic
 // upgrade upgrades a chart and CRDs.
 // Optionally lints the chart if the linting flag is set.
 func (c *HelmClient) upgrade(ctx context.Context, spec *ChartSpec, opts *GenericHelmOptions) (*release.Release, error) {
-	client := action.NewUpgrade(c.ActionConfig)
+	actionConfig, err := c.getActionConfig(spec.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	// client := action.NewUpgrade(c.ActionConfig)
+	client := action.NewUpgrade(actionConfig)
 	mergeUpgradeOptions(spec, client)
 	client.Install = true
 

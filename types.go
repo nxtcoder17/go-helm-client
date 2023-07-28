@@ -82,9 +82,11 @@ type HelmClient struct {
 	storage   *repo.File
 	// ActionConfig is the helm action configuration.
 	ActionConfig *action.Configuration
-	linting      bool
-	output       io.Writer
-	DebugLog     action.DebugLog
+	// getActionConfig is a function that returns the helm action configuration, when given a namespace
+	getActionConfig func(namespace string) (*action.Configuration, error)
+	linting         bool
+	output          io.Writer
+	DebugLog        action.DebugLog
 }
 
 type GenericHelmOptions struct {
